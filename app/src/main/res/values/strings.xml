@@ -1,3 +1,33 @@
 <resources>
     <string name="app_name">IU Digital Radio</string>
+
+    <!-- Sección 1: perfil -->
+    <string name="profile_name">Oyente IU Digital</string>
+    <string name="profile_subtitle">Toca la cámara para tu foto</string>
+    <string name="profile_photo_description">Foto de perfil del oyente</string>
+    <string name="profile_take_photo">Tomar foto de perfil</string>
+
+    <!-- Sección 2: reproductor -->
+    <string name="player_now_playing">Reproduciendo ahora</string>
+    <string name="player_paused">En pausa</string>
+    <string name="player_live">EN VIVO</string>
+    <string name="player_play">Reproducir</string>
+    <string name="player_pause">Pausar</string>
+    <string name="player_mute">Silenciar</string>
+    <string name="player_unmute">Activar sonido</string>
+    <string name="player_muted_badge">Silenciado</string>
+
+    <!-- Sección 3: catálogo -->
+    <string name="catalog_title">Emisoras disponibles</string>
+    <string name="catalog_selected">Sonando</string>
+
+    <!-- Permisos -->
+    <string name="permission_title">Permiso de cámara requerido</string>
+    <string name="permission_message">Para tomar tu foto de perfil, IU Digital Radio necesita acceso a la cámara. Puedes concederlo desde los ajustes de la aplicación.</string>
+    <string name="permission_settings">Abrir ajustes</string>
+    <string name="permission_dismiss">Entendido</string>
+
+    <!-- Estado del stream -->
+    <string name="stream_error">Sin conexión con el stream: el reproductor sigue funcionando en modo simulado.</string>
+    <string name="stream_buffering">Conectando…</string>
 </resources>

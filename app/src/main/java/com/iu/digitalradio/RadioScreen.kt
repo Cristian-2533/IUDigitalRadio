@@ -2,19 +2,28 @@ package com.iu.digitalradio
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.ImageDecoder
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.provider.MediaStore
+import android.provider.Settings
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,285 +35,568 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Radio
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.width
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import com.iu.digitalradio.ui.theme.IUDigitalRadioTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Locale
+import java.io.FileOutputStream
+
+private const val TAG = "RadioScreen"
 
 /**
- * Pantalla principal de IU Digital Radio.
+ * Pantalla principal de IU Digital Radio (componente con estado).
  *
- * Combina estado dinámico (reproducción, portada, contador de "me gusta")
- * con dos accesos a hardware del dispositivo: cámara (para cambiar la
- * portada de la emisora) y vibración (como confirmación háptica al dar
- * "me gusta"), ambos respaldados por su respectivo esquema de permisos.
+ * Concentra todo lo que depende del sistema operativo -permisos, camara,
+ * vibracion y ExoPlayer- y delega el dibujado en [RadioContent], que es una
+ * funcion sin estado y por tanto previsualizable con @Preview.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RadioScreen() {
+fun RadioScreen(stations: List<Station> = defaultStations) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    var isPlaying by remember { mutableStateOf(false) }
-    var stationName by remember { mutableStateOf("IU Digital Radio - 100.5 FM") }
-    var likeCount by remember { mutableIntStateOf(0) }
+    // --- RF-04: estado dinamico preservado ante rotaciones de pantalla ---
+    var isPlaying by rememberSaveable { mutableStateOf(false) }
+    var isMuted by rememberSaveable { mutableStateOf(false) }
+    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
+    var photoPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var showPermissionDialog by rememberSaveable { mutableStateOf(false) }
+    var streamFailed by rememberSaveable { mutableStateOf(false) }
 
-    var coverUri by remember { mutableStateOf<Uri?>(null) }
-    var coverBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
-    var showPermissionRationale by remember { mutableStateOf(false) }
+    val selectedStation = stations[selectedIndex.coerceIn(0, stations.lastIndex)]
 
-    // Carga la imagen capturada cada vez que cambia la Uri de portada.
-    LaunchedEffect(coverUri) {
-        val uri = coverUri
-        coverBitmap = if (uri != null) loadBitmapFromUri(context, uri) else null
+    // El Bitmap se deriva de la ruta guardada: asi la foto sobrevive tanto a una
+    // rotacion como a que el sistema destruya el proceso con la camara abierta.
+    var photo by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(photoPath) {
+        val path = photoPath
+        photo = if (path == null) null else withContext(Dispatchers.IO) { decodePhoto(path) }
     }
 
-    val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicture()
-    ) { success ->
-        if (success) {
-            coverUri = pendingCameraUri
+    // --- RF-07: reproduccion real de audio con Media3 ExoPlayer ---
+    val player = remember { ExoPlayer.Builder(context).build() }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                // El stream puede fallar por red; la UI sigue reaccionando igual.
+                Log.e(TAG, "Error de reproduccion: " + error.errorCodeName, error)
+                streamFailed = true
+            }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            player.release()
         }
     }
 
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+    // Carga la emisora seleccionada cada vez que cambia (RF-06).
+    LaunchedEffect(selectedStation.id) {
+        streamFailed = false
+        player.setMediaItem(MediaItem.fromUri(selectedStation.streamUrl))
+        player.prepare()
+    }
+
+    // El estado de Compose es la unica fuente de verdad; el player la sigue.
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) player.play() else player.pause()
+    }
+    LaunchedEffect(isMuted) {
+        player.volume = if (isMuted) 0f else 1f
+    }
+
+    // Sin servicio en primer plano, el audio no debe seguir sonando fuera de la app.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                player.pause()
+                isPlaying = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // --- RF-02: captura con TakePicturePreview ---
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bitmap ->
+        if (bitmap != null) {
+            scope.launch {
+                photoPath = withContext(Dispatchers.IO) { savePhoto(context, bitmap) }
+            }
+        }
+    }
+
+    // --- RF-03: solicitud del permiso de camara en tiempo de ejecucion ---
+    val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) {
-            val uri = createImageUri(context)
-            pendingCameraUri = uri
-            cameraLauncher.launch(uri)
-        } else {
-            showPermissionRationale = true
-        }
+        if (granted) cameraLauncher.launch(null) else showPermissionDialog = true
     }
 
-    fun onChangeCoverClick() {
-        val hasPermission = ContextCompat.checkSelfPermission(
+    fun onTakePhoto() {
+        val granted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.CAMERA
         ) == PackageManager.PERMISSION_GRANTED
 
-        if (hasPermission) {
-            val uri = createImageUri(context)
-            pendingCameraUri = uri
-            cameraLauncher.launch(uri)
-        } else {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        if (granted) cameraLauncher.launch(null)
+        else permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    fun onLikeClick() {
-        vibrateDevice(context)
-        likeCount++
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.app_name)) })
+    RadioContent(
+        stations = stations,
+        selectedStation = selectedStation,
+        isPlaying = isPlaying,
+        isMuted = isMuted,
+        streamFailed = streamFailed,
+        photo = photo,
+        onTakePhoto = { onTakePhoto() },
+        onPlayPause = {
+            // RF-05: pulsacion haptica corta en cada control del reproductor.
+            vibrate(context)
+            isPlaying = !isPlaying
+        },
+        onToggleMute = {
+            vibrate(context)
+            isMuted = !isMuted
+        },
+        onSelectStation = { station ->
+            vibrate(context)
+            selectedIndex = stations.indexOfFirst { it.id == station.id }.coerceAtLeast(0)
         }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Top
-        ) {
-            CoverArt(
-                bitmap = coverBitmap,
-                onClick = { onChangeCoverClick() }
-            )
+    )
 
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Text(
-                text = stationName,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = if (isPlaying) "Reproduciendo ahora" else "En pausa",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.secondary
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            FilledIconButton(
-                onClick = { isPlaying = !isPlaying },
-                modifier = Modifier.size(72.dp),
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primary
-                )
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (isPlaying) "Pausar" else "Reproducir",
-                    modifier = Modifier.size(36.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(28.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Button(
-                    onClick = { onLikeClick() },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors()
-                ) {
-                    Icon(Icons.Filled.Favorite, contentDescription = null)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Me gusta")
-                }
-
-                OutlinedButton(
-                    onClick = { onChangeCoverClick() },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.CameraAlt, contentDescription = null)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Portada")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = "Me gusta: $likeCount",
-                style = MaterialTheme.typography.bodyLarge
-            )
-        }
-    }
-
-    if (showPermissionRationale) {
+    if (showPermissionDialog) {
         AlertDialog(
-            onDismissRequest = { showPermissionRationale = false },
-            title = { Text("Permiso de cámara requerido") },
-            text = {
-                Text(
-                    "Para cambiar la portada de la emisora, IU Digital Radio necesita " +
-                        "acceso a la cámara. Concede el permiso desde los ajustes de la app."
-                )
-            },
+            onDismissRequest = { showPermissionDialog = false },
+            icon = { Icon(Icons.Filled.CameraAlt, contentDescription = null) },
+            title = { Text(stringResource(R.string.permission_title)) },
+            text = { Text(stringResource(R.string.permission_message)) },
             confirmButton = {
-                TextButton(onClick = { showPermissionRationale = false }) {
-                    Text("Entendido")
+                TextButton(onClick = {
+                    showPermissionDialog = false
+                    openAppSettings(context)
+                }) { Text(stringResource(R.string.permission_settings)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionDialog = false }) {
+                    Text(stringResource(R.string.permission_dismiss))
                 }
             }
         )
     }
 }
 
+/**
+ * Cuerpo visual de la pantalla, sin dependencias del sistema.
+ *
+ * RF-01: toda la maquetacion es declarativa (Column, Row, Card, LazyColumn,
+ * Modifier); no se usa ningun XML de vistas.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CoverArt(bitmap: Bitmap?, onClick: () -> Unit) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(220.dp),
-        shape = RoundedCornerShape(20.dp)
-    ) {
-        Box(
+fun RadioContent(
+    stations: List<Station>,
+    selectedStation: Station,
+    isPlaying: Boolean,
+    isMuted: Boolean,
+    streamFailed: Boolean,
+    photo: Bitmap?,
+    onTakePhoto: () -> Unit,
+    onPlayPause: () -> Unit,
+    onToggleMute: () -> Unit,
+    onSelectStation: (Station) -> Unit
+) {
+    Scaffold(
+        topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) }
+    ) { innerPadding ->
+        // Una unica LazyColumn sostiene las tres secciones: asi el contenido
+        // sigue siendo accesible en horizontal, donde no cabria en pantalla.
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
+                .padding(innerPadding),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (bitmap != null) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "Portada de la emisora",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
+            item { ProfileHeader(photo = photo, onTakePhoto = onTakePhoto) }
+
+            item {
+                PlayerCard(
+                    station = selectedStation,
+                    isPlaying = isPlaying,
+                    isMuted = isMuted,
+                    streamFailed = streamFailed,
+                    onPlayPause = onPlayPause,
+                    onToggleMute = onToggleMute
                 )
-            } else {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            }
+
+            item {
+                Text(
+                    text = stringResource(R.string.catalog_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                )
+            }
+
+            // RF-06: catalogo dinamico; la clave estable evita recomposiciones inutiles.
+            items(items = stations, key = { it.id }) { station ->
+                StationRow(
+                    station = station,
+                    isSelected = station.id == selectedStation.id,
+                    isPlaying = isPlaying && station.id == selectedStation.id,
+                    onClick = { onSelectStation(station) }
+                )
+            }
+        }
+    }
+}
+
+/** Seccion superior: foto circular del oyente y disparador de la camara. */
+@Composable
+private fun ProfileHeader(photo: Bitmap?, onTakePhoto: () -> Unit) {
+    Card(shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                    .clickable { onTakePhoto() },
+                contentAlignment = Alignment.Center
+            ) {
+                if (photo != null) {
+                    Image(
+                        bitmap = photo.asImageBitmap(),
+                        contentDescription = stringResource(R.string.profile_photo_description),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
                     Icon(
-                        imageVector = Icons.Filled.GraphicEq,
+                        imageVector = Icons.Filled.Person,
                         contentDescription = null,
-                        modifier = Modifier.size(56.dp),
+                        modifier = Modifier.size(32.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = onClick) {
-                        Text("Toca para añadir portada con la cámara")
-                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.profile_name),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = stringResource(R.string.profile_subtitle),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            FilledTonalIconButton(onClick = onTakePhoto) {
+                Icon(
+                    imageVector = Icons.Filled.CameraAlt,
+                    contentDescription = stringResource(R.string.profile_take_photo)
+                )
+            }
+        }
+    }
+}
+
+/** Seccion central: emisora en curso y controles Play/Pause y Mute. */
+@Composable
+private fun PlayerCard(
+    station: Station,
+    isPlaying: Boolean,
+    isMuted: Boolean,
+    streamFailed: Boolean,
+    onPlayPause: () -> Unit,
+    onToggleMute: () -> Unit
+) {
+    // Indicador "EN VIVO" que late solo mientras hay reproduccion.
+    val transition = rememberInfiniteTransition(label = "live")
+    val pulse by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "livePulse"
+    )
+
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(
+                imageVector = Icons.Filled.GraphicEq,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = station.name,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                text = station.frequency + "  -  " + station.genre,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = if (isPlaying) stringResource(R.string.player_live)
+                else stringResource(R.string.player_paused),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.alpha(if (isPlaying) pulse else 1f)
+            )
+
+            if (isMuted) {
+                Text(
+                    text = stringResource(R.string.player_muted_badge),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
+            if (streamFailed) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = stringResource(R.string.stream_error),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilledIconButton(
+                    onClick = onPlayPause,
+                    modifier = Modifier.size(72.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = if (isPlaying) stringResource(R.string.player_pause)
+                        else stringResource(R.string.player_play),
+                        modifier = Modifier.size(38.dp)
+                    )
+                }
+
+                FilledTonalIconButton(
+                    onClick = onToggleMute,
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff
+                        else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (isMuted) stringResource(R.string.player_unmute)
+                        else stringResource(R.string.player_mute),
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
         }
     }
 }
 
-/** Crea un archivo temporal en caché y devuelve una Uri segura vía FileProvider. */
-private fun createImageUri(context: Context): Uri {
-    val imagesDir = File(context.cacheDir, "images").apply { mkdirs() }
-    val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(java.util.Date())
-    val imageFile = File(imagesDir, "COVER_$timeStamp.jpg")
-    return FileProvider.getUriForFile(
-        context,
-        "${context.packageName}.fileprovider",
-        imageFile
-    )
-}
+/** Elemento del catalogo; resalta la emisora activa. */
+@Composable
+private fun StationRow(
+    station: Station,
+    isSelected: Boolean,
+    isPlaying: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.secondaryContainer
+            else MaterialTheme.colorScheme.surfaceVariant
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Filled.GraphicEq else Icons.Filled.Radio,
+                contentDescription = null,
+                modifier = Modifier.size(28.dp)
+            )
 
-/** Decodifica un Bitmap desde una Uri de forma compatible con la versión de Android. */
-private fun loadBitmapFromUri(context: Context, uri: Uri): Bitmap? {
-    return try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val source = ImageDecoder.createSource(context.contentResolver, uri)
-            ImageDecoder.decodeBitmap(source)
-        } else {
-            @Suppress("DEPRECATION")
-            MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = station.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                )
+                Text(
+                    text = station.frequency + "  -  " + station.genre,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (isSelected) {
+                Text(
+                    text = stringResource(R.string.catalog_selected),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
         }
-    } catch (e: Exception) {
-        null
     }
 }
 
-/** Activa la vibración del dispositivo como retroalimentación háptica. */
-private fun vibrateDevice(context: Context, durationMs: Long = 200) {
+// ---------------------------------------------------------------------------
+// Utilidades de sistema
+// ---------------------------------------------------------------------------
+
+/**
+ * Guarda la miniatura devuelta por la camara en la cache y retorna su ruta.
+ * Se conserva una sola foto para no acumular archivos en el dispositivo.
+ */
+private fun savePhoto(context: Context, bitmap: Bitmap): String? = try {
+    val dir = File(context.cacheDir, "profile").apply { mkdirs() }
+    dir.listFiles()?.forEach { it.delete() }
+    val file = File(dir, "profile_" + System.currentTimeMillis() + ".jpg")
+    FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out) }
+    file.absolutePath
+} catch (e: Exception) {
+    Log.e(TAG, "No se pudo guardar la foto de perfil", e)
+    null
+}
+
+/** Lee desde disco la foto de perfil previamente guardada. */
+private fun decodePhoto(path: String): Bitmap? = try {
+    BitmapFactory.decodeFile(path)
+} catch (e: Exception) {
+    Log.e(TAG, "No se pudo leer la foto de perfil", e)
+    null
+}
+
+/** Abre los ajustes de la app, para permisos denegados de forma permanente. */
+private fun openAppSettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null)
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Log.e(TAG, "No se pudieron abrir los ajustes de la aplicacion", e)
+    }
+}
+
+/**
+ * RF-05: pulsacion haptica corta mediante VibratorManager (Android 12+)
+ * o Vibrator en versiones anteriores.
+ */
+private fun vibrate(context: Context, durationMs: Long = 40) {
     val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
         manager.defaultVibrator
@@ -313,10 +605,83 @@ private fun vibrateDevice(context: Context, durationMs: Long = 200) {
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     }
 
+    if (!vibrator.hasVibrator()) return
+
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        vibrator.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+        vibrator.vibrate(
+            VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE)
+        )
     } else {
         @Suppress("DEPRECATION")
         vibrator.vibrate(durationMs)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Previsualizaciones (Paso 2.3: validar el aspecto sin compilar la app)
+// ---------------------------------------------------------------------------
+
+@Preview(showBackground = true, name = "Pantalla completa - en pausa")
+@Composable
+private fun RadioContentPreview() {
+    IUDigitalRadioTheme(dynamicColor = false) {
+        Surface {
+            RadioContent(
+                stations = defaultStations,
+                selectedStation = defaultStations.first(),
+                isPlaying = false,
+                isMuted = false,
+                streamFailed = false,
+                photo = null,
+                onTakePhoto = {},
+                onPlayPause = {},
+                onToggleMute = {},
+                onSelectStation = {}
+            )
+        }
+    }
+}
+
+@Preview(showBackground = true, name = "Pantalla completa - reproduciendo")
+@Composable
+private fun RadioContentPlayingPreview() {
+    IUDigitalRadioTheme(dynamicColor = false) {
+        Surface {
+            RadioContent(
+                stations = defaultStations,
+                selectedStation = defaultStations[2],
+                isPlaying = true,
+                isMuted = true,
+                streamFailed = false,
+                photo = null,
+                onTakePhoto = {},
+                onPlayPause = {},
+                onToggleMute = {},
+                onSelectStation = {}
+            )
+        }
+    }
+}
+
+@Preview(showBackground = true, name = "Cabecera de perfil")
+@Composable
+private fun ProfileHeaderPreview() {
+    IUDigitalRadioTheme(dynamicColor = false) {
+        Surface { ProfileHeader(photo = null, onTakePhoto = {}) }
+    }
+}
+
+@Preview(showBackground = true, name = "Emisora del catalogo")
+@Composable
+private fun StationRowPreview() {
+    IUDigitalRadioTheme(dynamicColor = false) {
+        Surface {
+            StationRow(
+                station = defaultStations.first(),
+                isSelected = true,
+                isPlaying = true,
+                onClick = {}
+            )
+        }
     }
 }

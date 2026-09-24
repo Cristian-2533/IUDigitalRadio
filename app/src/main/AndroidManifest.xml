@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Permiso de hardware: cámara (peligroso, requiere solicitud en tiempo de ejecución) -->
+    <!-- RF-03 | Permiso de hardware: cámara (peligroso, se solicita en tiempo de ejecución) -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <!-- Permiso de hardware: vibración (normal, se otorga automáticamente al instalar) -->
+    <!-- RF-03 | Permiso de hardware: vibración (normal, se otorga al instalar) -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- RF-07 | Necesario para el streaming de audio con Media3 ExoPlayer -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <uses-feature
         android:name="android.hardware.camera"
@@ -30,16 +32,6 @@
             </intent-filter>
         </activity>
 
-        <!-- FileProvider requerido para entregar la foto tomada con la cámara a la app -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
     </application>
 
 </manifest>
