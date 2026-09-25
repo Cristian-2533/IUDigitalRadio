@@ -136,6 +136,11 @@ fun RadioScreen(stations: List<Station> = defaultStations) {
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(playing: Boolean) {
+                // Si el audio vuelve a fluir, el aviso de error ya no aplica.
+                if (playing) streamFailed = false
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 // El stream puede fallar por red; la UI sigue reaccionando igual.
                 Log.e(TAG, "Error de reproduccion: " + error.errorCodeName, error)
@@ -542,7 +547,8 @@ private fun StationRow(
 
             if (isSelected) {
                 Text(
-                    text = stringResource(R.string.catalog_selected),
+                    text = if (isPlaying) stringResource(R.string.catalog_playing)
+                    else stringResource(R.string.catalog_selected),
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary

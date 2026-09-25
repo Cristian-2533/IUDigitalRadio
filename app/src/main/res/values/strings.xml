@@ -19,7 +19,8 @@
 
     <!-- Sección 3: catálogo -->
     <string name="catalog_title">Emisoras disponibles</string>
-    <string name="catalog_selected">Sonando</string>
+    <string name="catalog_selected">Seleccionada</string>
+    <string name="catalog_playing">Sonando</string>
 
     <!-- Permisos -->
     <string name="permission_title">Permiso de cámara requerido</string>
